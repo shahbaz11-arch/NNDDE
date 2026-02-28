@@ -1,0 +1,169 @@
+# Non-linear NDDE
+import torch
+import numpy as np
+from scipy.optimize import fsolve
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. Chebyshev Basis Implementation
+# ==========================================
+def get_chebyshev_basis(x, n_polys):
+    """
+    Generates Chebyshev polynomials T_n(x) and T'_n(x)
+    using recurrence relations for n = 0 to n_polys-1.
+    """
+    if x.dim() == 0:
+        x = x.unsqueeze(0)
+
+    num_points = len(x)
+    T = torch.zeros(num_points, n_polys, dtype=torch.float64)
+    T_d = torch.zeros(num_points, n_polys, dtype=torch.float64)
+
+    # Base Case: n=0 -> T_0 = 1, T'_0 = 0
+    T[:, 0] = 1.0
+
+    if n_polys > 1:
+        # Base Case: n=1 -> T_1 = x, T'_1 = 1
+        T[:, 1] = x
+        T_d[:, 1] = 1.0
+
+    # Recurrence Loop for n >= 2
+    for n in range(2, n_polys):
+        T[:, n] = 2 * x * T[:, n-1] - T[:, n-2]
+        T_d[:, n] = 2 * T[:, n-1] + 2 * x * T_d[:, n-1] - T_d[:, n-2]
+
+    return T, T_d
+
+def predict(x, w):
+    """
+    Returns y_approx and y'_approx for a given set of weights.
+    """
+    T, T_d = get_chebyshev_basis(x, len(w))
+    y = T @ w
+    y_d = T_d @ w
+    return y, y_d
+
+# ==========================================
+# 2. Problem Setup (LHS and RHS of NDDE)
+
+def compute_rhs(x):
+    """
+    Right Hand Side of the nonlinear NDDE.
+    """
+    sqrt_x = torch.sqrt(x)
+    sin_x = torch.sin(x)
+
+    term1 = torch.exp(2 * x)
+    term2 = torch.sqrt(torch.cos(x)) * torch.exp(sqrt_x)
+    term3 = (torch.sin(sqrt_x) + torch.exp(x)) * torch.exp(sin_x)
+
+    return term1 + term2 + term3
+
+def compute_lhs(x, w):
+    """
+    Left Hand Side of the nonlinear NDDE evaluated with current weights.
+    """
+    y_x, yd_x = predict(x, w)
+
+    # Delayed/Transformed states
+    sqrt_x = torch.sqrt(x)
+    sin_x = torch.sin(x)
+
+    _, yd_sqrt_x = predict(sqrt_x, w)
+    y_sin_x, _ = predict(sin_x, w)
+
+    term1 = y_x * yd_x
+    term2 = torch.sqrt(torch.cos(x)) * yd_sqrt_x
+    term3 = (torch.sin(sqrt_x) + torch.exp(x)) * y_sin_x
+
+    return term1 + term2 + term3
+
+# ==========================================
+# 3. System of Equations for fsolve
+
+def algebraic_system(w_np):
+    """
+    Takes a numpy array of 4 weights and returns an array of 4 residuals.
+    fsolve will try to drive these 4 residuals to exactly 0.
+    """
+    # Convert numpy array to PyTorch tensor
+    w = torch.tensor(w_np, dtype=torch.float64)
+
+    residuals = []
+
+    # Equation 1: Initial Condition (y(0) = 1)
+    x_0 = torch.tensor([0.0], dtype=torch.float64)
+    y_0, _ = predict(x_0, w)
+    residuals.append((y_0[0] - 1.0).item())
+
+    # Equations 2, 3, 4: ODE Collocation at x = {0.0, 0.5, 1.0} 
+    colloc_points = torch.linspace(0, 1, 17, dtype=torch.float64) #(1. This needs to change)
+
+    lhs = compute_lhs(colloc_points, w)
+    rhs = compute_rhs(colloc_points)
+
+    ode_errors = lhs - rhs
+
+    # Append the 3 ODE errors to the residuals list
+    residuals.extend(ode_errors.tolist())
+
+    return np.array(residuals)
+
+# ==========================================
+# 4. Solve using SciPy's fsolve
+# ==========================================
+print("Solving the 4x4 nonlinear algebraic system using fsolve...")
+
+# Initial guess for the weights [w0, w1, w2, w3, w4, w5] (2. This needs to change)
+# We start with [1, 1, 0, 0] as a neutral guess
+initial_guess = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,0.0, 0.0,0.0,0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+# Run fsolve
+w_sol_np = fsolve(algebraic_system, initial_guess)
+w_sol = torch.tensor(w_sol_np, dtype=torch.float64)
+
+print("\n--- Discovered Network Weights ---")
+print(f"w0: {w_sol[0]:.6f}")
+print(f"w1: {w_sol[1]:.6f}")
+print(f"w2: {w_sol[2]:.6f}")
+print(f"w3: {w_sol[3]:.6f}")
+print(f"w4: {w_sol[4]:.6f}")
+print(f"w5: {w_sol[5]:.6f}")
+print(f"w6: {w_sol[6]:.6f}")
+print(f"w7: {w_sol[7]:.6f}")
+print(f"w8: {w_sol[8]:.6f}")
+print(f"w9: {w_sol[9]:.6f}")
+
+# ==========================================
+# 5. Evaluate and Plot
+# ==========================================
+print("\n--- Solution Evaluation (10 Test Points) ---")
+print(f"{'x':<5} | {'y_approx':<12} | {'y_exact (e^x)':<15} | {'Relative Error':<15}")
+print("-" * 55)
+
+x_eval = torch.linspace(0, 1, 17, dtype=torch.float64) #(3. This needs to change)
+y_approx, _ = predict(x_eval, w_sol)
+y_exact = torch.exp(x_eval)
+
+rel_errors = torch.abs(y_approx - y_exact) / torch.abs(y_exact)
+
+for i in range(len(x_eval)):
+    x_val = x_eval[i].item()
+    approx_val = y_approx[i].item()
+    exact_val = y_exact[i].item()
+    err_val = rel_errors[i].item()
+    print(f"{x_val:<5.3f} | {approx_val:<12.6f} | {exact_val:<15.6f} | {err_val:<15.4e}")
+
+# Visualization
+plt.figure(figsize=(8, 5))
+plt.plot(x_eval.numpy(), y_exact.numpy(), 'k-', linewidth=2, label='Exact Analytical ($e^x$)')
+plt.plot(x_eval.numpy(), y_approx.numpy(), 'r--', linewidth=2, label='Chebyshev ONN Approximation')
+plt.scatter(x_eval.numpy(), predict(x_eval, w_sol)[0].numpy(), color='blue', zorder=5, label='Collocation Points')
+plt.title("Nonlinear NDDE: fsolve Approximation vs Exact Solution")
+plt.xlabel("x")
+plt.ylabel("y(x)")
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.show()
